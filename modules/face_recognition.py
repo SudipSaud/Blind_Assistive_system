@@ -2,21 +2,21 @@
 Face Recognition Module - InsightFace Buffalo Model
 """
 import os
-import pickle
 import numpy as np
 import logging
 from typing import List, Dict, Any
 from insightface.app import FaceAnalysis
 from config import INSIGHTFACE_MODEL
+from modules.database import DatabaseManager # Import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
 class FaceRecognizer:
-    def __init__(self, db_path="modules/known_faces.pkl"):
+    def __init__(self, db_manager: DatabaseManager):
         self.app = None
         self.known_embeddings = []
         self.known_names = []
-        self.db_path = db_path
+        self.db_manager = db_manager # Use the database manager
         self.is_initialized = False
 
     def load_model(self):
@@ -34,19 +34,15 @@ class FaceRecognizer:
             self.is_initialized = False
 
     def _load_database(self):
-        if os.path.exists(self.db_path):
-            with open(self.db_path, 'rb') as f:
-                data = pickle.load(f)
-                self.known_names = data.get('names', [])
-                self.known_embeddings = data.get('embeddings', [])
+        """Loads known faces from the MongoDB database."""
+        all_people = self.db_manager.get_all_people()
+        if all_people:
+            self.known_names = [person['name'] for person in all_people]
+            # Ensure embeddings are numpy arrays for calculations
+            self.known_embeddings = [np.array(person['face_embedding']) for person in all_people]
             logger.info(f"Loaded {len(self.known_names)} known faces from database.")
         else:
             logger.info("No existing face database found.")
-
-    def _save_database(self):
-        with open(self.db_path, 'wb') as f:
-            pickle.dump({'names': self.known_names, 'embeddings': self.known_embeddings}, f)
-        logger.info("Face database saved.")
 
     def recognize(self, frame: np.ndarray) -> List[Dict[str, Any]]:
         if not self.is_initialized:
@@ -63,7 +59,8 @@ class FaceRecognizer:
         for face in faces:
             embedding = face.embedding
             # Using cosine similarity
-            sims = np.dot(self.known_embeddings, embedding) / (np.linalg.norm(self.known_embeddings, axis=1) * np.linalg.norm(embedding))
+            # Ensure known_embeddings is a 2D numpy array for this operation
+            sims = np.dot(np.array(self.known_embeddings), embedding) / (np.linalg.norm(self.known_embeddings, axis=1) * np.linalg.norm(embedding))
             best_match_idx = np.argmax(sims)
             confidence = sims[best_match_idx]
 
@@ -94,9 +91,15 @@ class FaceRecognizer:
         
         # Normalize name
         clean_name = name.strip().title()
-        
-        self.known_embeddings.append(embedding)
-        self.known_names.append(clean_name)
-        self._save_database()
-        logger.info(f"Successfully saved face for {clean_name}.")
-        return True
+
+        # Save to database via DatabaseManager
+        success = self.db_manager.add_person(clean_name, embedding.tolist()) # Store as list
+
+        if success:
+            # Reload the in-memory database to include the new face immediately
+            self._load_database()
+            logger.info(f"Successfully saved face for {clean_name}.")
+            return True
+        else:
+            logger.error(f"Failed to save face for {clean_name} to the database.")
+            return False
